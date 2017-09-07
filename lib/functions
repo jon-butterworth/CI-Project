@@ -1,0 +1,691 @@
+#
+#
+# Common functions used by all of the build scripts.
+
+function join_by { local IFS="$1"; shift; echo "$*"; }
+
+usage() {
+  echo "$PROGNAME"
+  usage_content
+  echo -e "    --debug\tTurn on debug logging"
+  echo -e "    --help\tShow this usage"
+  echo
+  echo -e "All functions require environment variables from Jenkins or otherwise."
+}
+
+resolve() {
+  local role=$1
+  local hostname=$(generate_hostname $role)
+  local ip=$(get_hostdata_or_default "$role" "ETH0_IP" $(get_ip_from_map "$role"))
+
+  host=""
+
+  if [[ "$ip" != "" ]]; then
+    host=$ip
+  else
+    host=$hostname
+  fi
+
+  echo $host
+}
+
+reduce_role() {
+  echo $(sed -r 's/[0-9]+$//g'<<<$1)
+}
+
+generate_hostname() {
+  local role=$1
+
+  local statichostname=$(get_hostdata "$role" "HOSTNAME")
+
+  local TLD_HOST=$(get_hostdata_or_default "$role" "DOMAIN" "$DOMAIN")
+
+if [[ "$statichostname" != "" ]] && grep -E "$TLD_HOST$"<<<$statichostname > /dev/null; then
+  echo "$statichostname"
+else
+  if [[ "$BUILD_MODE" == "persistent" ]]; then
+    echo "${JOB_ROOT_NAME}-${BRANCH_NAME}-$role.$TLD_HOST"
+  elif [[ "$BUILD_MODE" == "oneshot" ]]; then
+    echo "${JOB_ROOT_NAME}-$role.$TLD_HOST"
+  else
+    echo "${BUILD_TAG}-$role.$TLD_HOST"
+  fi
+fi
+}
+
+#Custom hammer command because it turns out hammer throws out false exit codes.
+hammer() {
+  local realHammer=$(which hammer)
+  local PARAM;
+  local PARAMS;
+
+  for PARAM in "$@"
+  do
+    PARAMS="${PARAMS}\"${PARAM}\""
+  done
+
+  debug "Executing hammer command '$command'"
+  local output=""
+  output=$(eval $command 2>&1)
+  local ecode=$?
+
+  echo "+ $command" >> $WORKSPACE/hammer.log
+  echo $output >> $WORKSPACE/hammer.log
+
+  if [[ $DEBUGLOG ]]; then
+    debug "$command: $output"
+  fi
+
+  if grep -E '^([[:space:]]+)?from'<<<"$output" && grep ": Interrupt" && [[ $ecode -eq 0 ]]; then
+    error "Caught hammer false 0 stack trace"
+    return 250
+  else
+    return $ecode
+  fi
+}
+
+## 0 if exists; non-zero otherwise
+check_vm_exists() {
+  local hostname=$(generate_hostname $1)
+
+  if [[ "$hostname" == "" ]]; then
+    error "${FUNCNAME[0]}: needs hostname"
+    return 10
+  fi
+
+  local e;
+    hammer host info --name $hostname
+    e=$?
+
+    if [[ $e -eq 128 ]] || [[ $e -eq 70 ]] || [[ $e -eq 64 ]]; then
+      debug "$hostname does not exist in satellite"
+      return 1
+    elif [[ $e -eq 0 ]]; then
+      debug "$hostname exists in satellite"
+      return 0
+    else
+      error "Checked $hostname and got an unknown exit code '$e'"
+      return 20
+    fi
+}
+
+create_vm() {
+  local role=$1
+  local hostname=$(get_hostdata_or_default "$role" "HOSTNAME" $(generate_hostname "$role"))
+  #local domain=$(get_hostdata_or_default "$role" "DOMAIN" "$DOMAIN")
+  local sat_dom_id=$(get_hostdata_or_default "$role" "SAT_DOM_ID" "$DOMAIN_ID")
+  local ip=$(get_hostdata_or_default "$role" "ETH0_IP" $(get_ip_from_map "$role"))
+  local subnet=$(get_hostdata_or_default "$role" "ETH0_SAT_SUBNET" "$SUBNET")
+  local compute_profile=$(get_hostdata_or_default "$role" "VMW_CMPT_PROFILE" "$DEFAULT_VMW_COMPUTE")
+
+  local sat_image=$(get_hostdata_or_default "$role" "SAT_IMAGE" "default-image")
+	local sat_parttbl_id=$(get_hostdata_or_default "$role" "SAT_PARTTBL_ID" "61")
+	local sat_location=$(get_hostdata_or_default "$role" "SAT_LOCATION" "$LOCATION")
+	local sat_org=$(get_hostdata_or_default "$role" "SAT_ORG" "$ORGANISATION")
+	local sat_os_id=$(get_hostdata_or_default "$role" "SAT_OS_ID" "$OPERATING_SYSTEM_ID")
+	local ethcount=$(get_hostdata_or_default "$role" "ETHCOUNT" "1")
+
+	ethcount=$((ethcount-1))
+
+	if [[ "$hostname" == "" ]]; then
+	    echo "${FUNCNAME[0]}: need hostname"
+			return 10
+	fi
+
+	local ccreate="creates/create-$role.sh"
+
+	if [[ -e $ccreate ]]; then
+		echo "Running $ccreate"
+
+		$ccreate $hostname $ip
+
+    return $?
+	else
+	  info "Creating using '$role $hostname $ip'"
+
+		buffer="hammer host create"
+		buffer="$buffer --architecture x86_64"
+		buffer="$buffer --architecture-id 1"
+		buffer="$buffer --build yes"
+		buffer="$buffer --comment \"Created by Jenkins, part of build $BUILD_NUMBER\""
+		buffer="$buffer --compute-attributes \"start=1\""
+		buffer="$buffer --compute-profile \"$compute_profile\""
+		buffer="$buffer --compute-resource-id 1"
+		#buffer="$buffer --domain \"$TLD_HOST\""
+		buffer="$buffer --domain-id $sat_dom_id"
+		buffer="$buffer --environment-id 1"
+		buffer="$buffer --ip $ip"
+		buffer="$buffer --image \"$sat_image\""
+		buffer="$buffer --location \"$sat_location\""
+		buffer="$buffer --name \"$hostname\""
+		#buffer="$buffer --operatingsystem \"$OPERATING_SYSTEM\""
+		buffer="$buffer --operatingsystem-id $sat_os_id"
+		buffer="$buffer --organization \"$sat_org\""
+		buffer="$buffer --partition-table-id $sat_parttbl_id"
+		buffer="$buffer --provision-method image"
+		buffer="$buffer --puppet-proxy-id 1"
+		buffer="$buffer --root-pass '$ROOT_PASSWORD'"
+		buffer="$buffer --subnet \"$subnet\""
+
+		local interfaces=""
+		for i in `seq 0 $ethcount`; do
+			local eth_ip=$(get_hostdata_or_default "$role" "ETH${i}_IP" $(get_ip_from_map "$role"))
+			debug "ETH${i}_IP for eth_ip is $eth_ip"
+			local eth_sat_sub_id=$(get_hostdata_or_default "$role" "ETH${i}_SAT_SUBNET_ID" "$SUBNET_ID")
+			local eth_vmw_net=$(get_hostdata_or_default "$role" "ETH${i}_VMW_NETWORK" "$DEFAULT_VMW_NETWORK")
+
+			if [[ $i -eq 0 ]]; then
+				buffer="$buffer --interface \"ip=eth_ip,domain-id=$sat_dom_id,subnet-if=$eth_sat_sub_id,provision=1,primary=1,managed=1,compute_type=VirtualVmxnet3,compute_network=$eth_vmw_net\""
+			else
+				buffer="$buffer --interface \"ip=eth_ip,domain-id=$sat_dom_id,subnet-if=$eth_sat_sub_id,managed=1,compute_type=VirtualVmxnet3,compute_network=$eth_vmw_net\""
+			fi
+		done
+
+		  eval $buffer
+
+		  return $?
+	fi
+}
+
+## o if port 22 is open, non-zero otherwise
+test_ssh() {
+		local host=$1
+
+		if [[ "$host" == "" ]]; then
+				error "${FUNCNAME[0]}: need host"
+				return 10
+		fi
+
+		return $(timeout 10 bash -c "cat < /dev/null > /dev/tcp/$host/22 2> /dev/null")
+}
+
+## 0 if running, non-zero otherwise
+running_vm() {
+		local role=$1
+		local hostname=$(generate_hostname "$role")
+
+		if [[ "$role" == "" ]]; then
+				echo "${FUNCNAME[0]}: need role"
+				return 10
+		fi
+
+		local query=$(resolve $role)
+
+		info "Querying $query"
+
+		local exists="exists/exists-$role.sh"
+
+		if [[ -e $exists ]]; then
+		    info "Using $exists"
+				return $($exists $query)
+		else
+		    info "Using port check on $query:22"
+        return $(test_ssh $query)
+		fi
+}
+
+delete_vm() {
+		local role=$1
+		local hostname=$(generate_hostname "$role")
+
+		if [[ "$role" == "" ]]; then
+		    echo "${FUNCNAME[0]}: need role"
+				return 10
+		fi
+
+		deletes="deletes/delete-$role.sh"
+
+		if [[ -e "$deletes" ]]; then
+				echo "Using $deletes"
+				eval $deletes $hostname
+		else
+				eval hammer host delete --name $hostname
+
+				if [[ $? -eq 0 ]]; then
+				    success "$hostname deleted successfully"
+
+						return 0
+				else
+				    error "Delete for $hostname unsuccessful"
+
+						return 1
+				fi
+		fi
+}
+
+generate_free_ips() {
+		local howmany=$1
+		local filter=$(join_by "|" $SPAWN_BLACKLIST | sed -r 's#\.\#\\.#g')
+
+		# fping fetches a list of all unreachable addresses. unfortunately is also includes network and broadcast
+		# it is also somwhat random order and sometimes contains dupes due to how it probes, so we sort and take off the head and tail
+		# then we take the ones we need.
+    #
+    #
+
+		local iplist=$(fping -r1 -u -g $SPAWN_CIDR 2> /dev/null | sort -n -t . -k 1,1 -k 2,2 -k 3,3 -k 4,4 | uniq | tail -n+2 | head -n -1 | grep -v -E "$filter" | head -n$howmany)
+
+		if [[ $(wc -w <<< $iplist) -lt $hownamy ]]; then
+		    echo "Not enough IP Addresses. We have a problem."
+		fi
+
+		echo $iplist
+}
+
+free_ips_available() {
+    local ip;
+
+		local filter=$(join_by "|" $SPAWN_BLACKLIST | sed -r 's#\.\#\\.#g')
+
+      #debug "fping -r1 -u -g $SPAWN_CIDR 2> /dev/null | sort -n -t . -k 1,1 -k 2,2 -k 3,3 -k 4,4 | uniq | tail -n+2 | head -n -1 | grep -v -E "$filter" | wc -w"
+		local count_available=$(fping -r1 -u -g $SPAWN_CIDR 2> /dev/null | sort -n -t . -k 1,1 -k 2,2 -k 3,3 -k 4,4 | uniq | tail -n+2 | head -n -1 | grep -v -E "$filter" | wc -w)
+
+		echo $count_available
+}
+
+clear_ip_map() {
+  rm -f $IPMAP
+}
+
+add_to_ip_map() {
+		local host=$1
+		local ip=$2
+
+    if [[ $host == "" ]] || [[ $ip == "" ]]; then
+		   echo "WARNING: Missing host or ip in add_to_ip_map"
+
+			 return 1
+		fi
+
+		echo "$host-ip=$ip" >> $IPMAP
+}
+
+get_ip_from_map() {
+    local host=$1
+
+		if [[ "$host" == "" ]]; then
+		    echo "Warning: Host is blank"
+
+				return 1
+	  fi
+
+		echo $(grep "$host-ip" $IPMAP 2> /dev/null | cut -d"=" -f2)
+}
+
+get_hostdata() {
+    local role=$1
+		local key=$2
+
+		local datafile="$HOSTDATA/${role}.hostdata"
+
+		if [[ -f "datafile" ]]; then
+		    data=$(grep --max-count=1 "^$key=" "$datafile" 2> /dev/null | cut -d"=" -f2 | sed -e 's/[[:space:]]*$//')
+				echo $data
+    else
+		    echo ""
+		fi
+}
+
+get_hostdata_or_default() {
+    local role=$1
+		local key=$2
+		local default=$3
+
+		data=$(get_hostdata "$role" "$key")
+
+		if [[ "$data" == "" ]]; then
+		    echo $default
+		else
+		    echo $data
+		fi
+}
+
+killscripts() {
+    if [[ "$PID" != "" ]]; then
+    		warning "No PIDS to kill"
+		    return
+		fi
+
+		warning "Killing '$PIDS', if script continues hold CTRL+C to bin new processes"
+
+		kill -s SIGINT $PIDS
+}
+
+remove_from_knownhosts() {
+    local host=$1
+
+		ssh-keygen -R "$host" -f ~/.ssh/known_hosts > /dev/null 2>&1
+}
+
+wall_clock() {
+    #WALL_CLOCK=$(date +"%s") - This is now defined at the start of common
+
+		local end=$(date +"%s")
+		local diff=$(($end - $WALL_CLOCK))
+
+		echo $diff
+}
+
+start_timer() {
+  local name=$1
+
+  local timername="timer_${name}_start"
+
+  eval "$timername=$(date +%s)"
+}
+
+get_timer() {
+  local name=$1
+
+  start=$(evalk echo \${timer_${name}_start})
+
+  end=$(date +%s)
+
+  echo $(($end - $start))
+}
+
+print_debug_timer() {
+  local name=$1
+
+  local duration=$(get_timer "$name")
+
+  debug "Timer $name lap at $duration seconds"
+}
+
+exit_clock() {
+    info "$PROGNAME took $(wall_clock) seconds to run"
+}
+
+puppet_cert_sign() {
+    local role=$1
+		local QUERY_HOST=$(generate_hostname $role)
+
+		if ! check_vm_exists $role; then
+		    warning "'$QUERY_HOST' does not exist, are you trying to sign a key for a host that no longer exists"
+		fi
+
+		testcert=$(curl -k -X GET --cert $CERTFILE --key $KEYFILE https://$PUPPETSERVER:8140/puppet-ca/v1/certificate_status/$QUERY_HOST?environment=production 2> /dev/null)
+
+		if grep '"state":"signed"'<<<$testcert; then
+		    warning "Cert is already signed"
+				return 0
+		fi
+		debug "CSR on puppet server: $testcert"
+
+		debug "curl -k -X PUT --cert $CERTFILE --key $KEYFILE -H "Content-Type: text/pson" -d \"{\"desired_state\":\"signed\"}\" https://$PUPPETSERVER:8140/puppet-ca/v1/certificate_status/$QUERY_HOST?environment=production"
+		local output=""
+		output=$(curl -k -X PUT --cert $CERTFILE --key $KEYFILE -H "Content-Type: text/pson" -d \"{\"desired_state\":\"signed\"}\" https://$PUPPETSERVER:8140/puppet-ca/v1/certificate_status/$QUERY_HOST?environment=production 2> /dev/null)
+
+		ecode=$?
+		debug "$output"
+
+		return $ecode
+}
+
+puppet_cert_revoke() {
+		local role=$1
+		local QUERY_HOST=$(generate_hostname $role)
+
+		info "Revoking puppet cert for $QUERY_HOST"
+
+		if check_vm_exists $role; then
+		    warning "'$QUERY_HOST' still exists, this may prevent it completing puppet runs!"
+		fi
+
+    local output=""
+
+		debug "Issuing deactivation"
+		debug "curl -k -H \"Content Type: application/json\" -H \"Accept: application/json\" -d \"{\"command\":\"deactivate node\",\"version\":3,\"payload\":{\"certname\": \"$QUERY_HOST\"}}\" --cert $CERTFILE --key $KEYFIL https://$PUPPETSERVER:8081/pdb/cmd/v1"
+		output=$(curl -k -H \"Content Type: application/json\" -H \"Accept: application/json\" -d \"{\"command\":\"deactivate node\",\"version\":3,\"payload\":{\"certname\": \"$QUERY_HOST\"}}\" --cert $CERTFILE --key $KEYFIL https://$PUPPETSERVER:8081/pdb/cmd/v1 2>/dev/null)
+
+		ecode=$?
+
+		if [[ $ecode -ne 0 ]]; then
+		    error "Deactivate for $QUERY_HOST exited non-zero"
+				error "$output"
+				#return $?
+		else
+		   debug "$output"
+		fi
+
+		output=""
+		ecode=""
+
+		debug "Issuing Revoke"
+		debug "curl -k -X PUT --cert $CERTFILE --key $KEYFILE -H "Content-Type: text/pson" -d \"{\"desired_state\":\"revoked\"}\" https://$PUPPETSERVER:8140/puppet-ca/v1/certificate_status/$QUERY_HOST?environment=production"
+		output=$(curl -k -X PUT --cert $CERTFILE --key $KEYFILE -H "Content-Type: text/pson" -d \"{\"desired_state\":\"revoked\"}\" https://$PUPPETSERVER:8140/puppet-ca/v1/certificate_status/$QUERY_HOST?environment=production 2>/dev/null)
+
+		ecode=$?
+
+		if [[ $ecode -ne -0 ]]; then
+		    error "Revoke for $QUERY_HOST exited non-zero"
+				error "$output"
+				return $?
+		else
+		    debug "$output"
+		fi
+
+		sleep 5
+
+		debug "Deleting cert"
+		debug "curl -k -X DELETE --cert $CERTFILE --key $KEYFILE https://$PUPPETSERVER:8140/puppet-ca/v1/certificate_status/$QUERY_HOST?environment=production"
+		output=$(curl -k -X DELETE --cert $CERTFILE --key $KEYFILE https://$PUPPETSERVER:8140/puppet-ca/v1/certificate_status/$QUERY_HOST?environment=production 2>/dev/null)
+
+		ecode=$?
+		debug "$output"
+
+		return $ecode
+}
+
+install_katello_ca() {
+  local role=$1
+  local host=$(resolve $role)
+  local katellolog
+
+  #sart_timer "install_katello_ca-$role"
+
+  info "Adding katello CA to $role"
+
+  katellolog=$(timeout 300 sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host "rpm -Uvh http://katello-server/pub/katello-ca-consumer-latest.noarch.rpm" 2>&1)
+
+  if [[ $? -ne 0 ]]; then
+    error "Unable to install Katello CA on $role: $katellolog"
+    exit 1
+  fi
+
+  #print_debug_timer "install_katello_ca-$role"
+}
+
+register_host_satellite() {
+  local role=$1
+  local host=$(resolve $role)
+  local registerlog
+
+  #start_timer "register_host_satellite-$role"
+
+  info "Registering $host with subscription-manager"
+  debug "subscription-manager register usually fails, not an issue"
+  registerlog=$(timeout 300 sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host 'subscription-manager register --org="SMART" --activationkey="RHEL6"')
+  local ecode=$?
+  debug "Register exited with $ecode: $registerlog"
+
+  #The above always fails annoyingly. But we know how to get the certs to update...()
+
+  #Catch the register timeout though...
+  if [[ $ecode -eq 124 ]]; then
+    error "subscription-manager register on $role timed out"
+    exit $ecode
+  fi
+
+  #print_debug_timer "register_host_satellite-$role"
+}
+
+rhsmcert_cert_update() {
+  local role=$1
+  local host=$(resolve $role)
+  local rhsmcertdlog
+
+  #start_timer "rhsmcertd_cert_update_$role"
+
+  info "rhsmcertd update on $role"
+  rhsmcertdlog=$(timeout 300 sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host '/etc/init.d/rhsmcertd stop && /usr/bin/rhsmcertd -n && sleep 30 && /etc/init.d/rhsmcertd restart' 2>&1)
+
+  if [[ $? -ne 0 ]]; then
+    error "Unable to regresh certificate on $role: $rhsmcertdlog"
+    error "rhsmcertd_cert_update failed with $?"
+    exit 2
+  fi
+
+  #print_debug_timer "rhsmcert_cert_update-$role"
+}
+
+enable_sat_repos() {
+  local role=$1
+  local host=$(resolve $role)
+  local repoenablelog
+
+  #start_timer "enable_sat_repos-$role"
+
+  info "Enabling repositories on $role"
+  repoenablelog=$(timeout 300 sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host "subscription-manager repos --enable=rhel-\*-satellite-tools=\*-rpms" 2>&1)
+
+  if [[ $? -ne 0 ]]; then
+    error "Unable to enale repositories on $role: $repoenablelog"
+    exit 3
+  fi
+
+  #print_debug_timer "enable_sat_repos-$role"
+}
+
+install_katello_agent() {
+  local role=$1
+  local host=$(resolve $role)
+  local katelloinstalllog
+
+  #start_timer "install_katello_agent-$role"
+
+  info "Installing Katello Agent on $role"
+  katelloinstalllog=$(timeout 300 sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host "yum -y install katello-agent" 2>&1)
+
+  if [[ $? -ne 0 ]]; then
+    error "Unable to install Katello Agent on $role: $katelloinstalllog"
+    exit 4
+  fi
+
+  #print_debug_timer "install_puppet_agent-$role"
+}
+
+install_puppet_agent() {
+  local role=$1
+  local host=$(resolve $role)
+  local hostname=$(generate_hostname $role)
+
+  info "Installing puppet agent on $hostname with env $BRANCH_NAME"
+
+  sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host "mkdir -p /etc/puppetlabs/facter/facts.d/ && echo '{\"env\": \"$BRANCH_NAME\"}' > /etc/puppetlabs/facter/facts.d/facts.json"
+  sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host "yum install puppet-agent -y"
+  sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host "puppet config set server '$PUPPETSERVER'"
+  sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host "puppet config set certname '$hostname'"
+  sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host "puppet-agent -t" || true
+}
+
+puppet_initial_run() {
+  role=$1
+  host=$(resolve $role)
+  hostname=$(generate_hostname $role)
+
+  info "Performing initial Puppet run for $role"
+
+  sshpass -e scp -o "StrictHostkeyChecking=no" "$DIR/puppet-initial.sh" root@$host:/root/puppet-initial.sh
+
+  sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host 'chmod +x /root/puppet-initial.sh'
+
+  timeout -k 60 30 sshpass -e ssh -o "StrictHostkeyChecking=no" root@$host '/usr/bin/nohup bash -c "/root/puppet-initial.sh > puppet-initial.log 2>&1"'
+
+  info "puppet-initial being killed, expected and can ignore"
+}
+
+# runs all functions asynchronously, returns once when complete
+# assumed they only need the role which is provided as a list
+batch_exec() {
+    local execute=$1
+		local list=$2
+
+		debug "Batch Exec executing $execute"
+
+		local PIDS=""
+
+		for role in $list; do
+		    $execute $role &
+
+				PIDS="$PIDS $!"
+		done
+
+		failed=0
+
+		for PID in $PIDS; do
+		    debug "Waiting/collecting $PID"
+				wait $PID
+
+				ecode=$?
+
+				if [[ $ecode -ne 0 ]]; then
+				    failed=$ecode
+						warning "$execute $PID exited with $ecode"
+				else
+				    debug "$execute $PID exited with $ecode"
+				fi
+		done
+
+		debug "batch_exec finished $execute"
+
+		return $failed
+}
+
+# execute functions asynchronously limited by the number we want to run simultaneously
+# assumed all functions only need the role parameter
+batch_limit_exec() {
+    local execute=$1
+		local limit=$2
+		local list=$3
+
+		debug "batch_limit_exec is executing $execute"
+
+		local ROLE_LIST=$(printf "%s\n" $(sed -e 's/ +/ /g'<<<$list))
+
+		local PIDS=""
+
+		while [[ "$ROLE_LIST" != "" ]]; do
+
+				if [[ $(jobs -pr | wc -l) -lt $limit ]]; then
+		    		role=$(head -n1<<<"$ROLE_LIST")
+						ROLE_LIST=$(tail -n+2<<<"$ROLE_LIST")
+
+						execute "$role" &
+						PIDS="$PIDS+$!"
+						debug "PID List is now $PIDS"
+				else
+				    sleep 1;
+				fi
+		done;
+
+		failed=0
+
+		for PID in $PIDS; do
+		    debug "Waiting/collecing $PID"
+				wait $PID
+
+				ecode=$?
+
+				if [[ $ecode -ne 0 ]]; then
+				    failed=$ecode
+						warning "$execute $PID exited with $ecode"
+				else
+				    debug "$execute $PID exited with $ecode"
+				fi
+		done
+
+		debug "batch_limit_exec finished $execute"
+
+		return $failed
+}
