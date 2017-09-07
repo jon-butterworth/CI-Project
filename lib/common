@@ -1,0 +1,113 @@
+#
+#
+# Common initialization used by all the provisioning scripts
+
+PROGNAME=`basename "$0"`
+DIR="$( dirname $( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd ) )"
+
+. $DIR/lib/config
+. $DIR/lib/colours
+. $DIR/lib/functions
+
+WALL_CLOCK=$(date +"%s")
+
+DEBUGLOG=false
+FORCE=false
+HELP=false
+
+if [[ "$@" != "" ]]; then
+    OPTS=`getopt -o d::f::h::y: --long debug::,force::,help:: -n "$PROGNAME" -- "$@"`
+
+    if [ $? != 0 ]; then error "getopt failed parsing options" >&2 ; exit 99; fi
+
+    eval set -- "$OPTS"
+
+    while true; do
+        case "$1" in
+                -d|--debug ) DEBUGLOG=true; info "Debugging mode on"; shift ;;
+                -f|--force ) FORCE=true; shift ;;
+                -h|--help ) HELP=true; usage; exit 0; shift ;;
+                -- ) shift; break ;;
+                * ) break ;;
+        esac
+    done
+fi
+
+if [[ -n ""$DEBUG" ]]; then
+    DEBUGLOG=$DEBUG
+    info "Debug mode on (from env)"
+fi
+
+if $FORCE && [[ "$PROGNAME" == "create-vms.sh" ]]; then
+    warning "Force does not apply on $PROGNAME"
+fi
+
+if [[ "$BUILD_NUMBER" == "" ]] || [[ $BRANCH_NAME == "" ]] || [[ "$JOB_NAME" == "" ]] || [[ "$JOB_BASE_NAME" == "" ]] || [[ "$BUILD_TAG" == "" ]] || [[ "$WORKSPACE" == "" ]]; then
+    error "Need environment from Jenkins, or suitable substitution for $BRANCH_NAME, $BUILD_NUMBER, $JOB_NAME, $JOB_BASE_NAME, $BUILD_TAG and $WORKSPACE"
+    error "See README.md"
+    exit 100
+fi
+
+JOB_ROOT_NAME=$(sed -r 's#/.+$##'<<<$JOB_NAME)
+
+debug "BUILD_NUMBER: $BUILD_NUMBER"
+debug "BRANCH_NAME: $BRANCH_NAME"
+debug "JOB_NAME: $JOB_NAME"
+debug "JOB_BASE_NAME: $JOB_BASE_NAME"
+debug "JOB_ROOT_NAME: $JOB_ROOT_NAME (constructed by us)"
+debug "BUILD_TAG: $BUILD_TAG"
+debug "WORKSPACE: $WORKSPACE"
+
+if [[ -z "$BUILD_MODE" ]]; then
+    error "BUILD_MODE not defined, please set environment variable to either auto, persist or oneshot as per README.md"
+    exit 101
+fi
+
+VM_COUNT=$(wc -w <<< $VM_LIST)
+
+if [[ "$BUILD_MODE" == "auto "]]; then
+    IPMAP="$DIR/ipmaps/temp-auto-$BUILD_NUMBER.ipmap
+    HOSTMAP="$DIR/ipmaps/temp-auto-$BUILD_NUMBER.hostmap"
+    HOSTDATA="$DIR/ipmaps/temp-auto-$BUILD_NUMBER.hostdata"
+elif [[ "$BUILD_MODE" == "persistent" ]]; then
+    IPMAP="$DIR/ipmaps/$JOB_ROOT_NAME-$BRANCH_NAME.ipmap"
+    HOSTMAP="$DIR/ipmaps/$JOB_ROOT_NAME-$BRANCH_NAME.hostmap"
+    HOSTDATA="$DIR/ipmaps/$JOB_ROOT_NAME-$BRANCH_NAME.hostdata"
+elif [[ "$BUILD_MODE" == "oneshot" ]]; then
+    IPMAP="$DIR/ipmaps/$JOB_ROOT_NAME.ipmap"
+    HOSTMAP="$DIR/ipmaps/$JOB_ROOT_NAME.hostmap"
+    HOSTDATA="$DIR/ipmaps/$JOB_ROOT_NAME.hostdata"
+else
+    error "Unknown BUILD_MODE: $BUILD_MODE"
+    exit 102
+fi
+
+if [[ "$ROOT_PASSWORD" == "" ]]; then
+    error "Please specify a root password in environmnt/Jenkinsfile"
+    exit 106
+fi
+
+if [[ "$CERTFILE" == "" ]] || [[ "$KEYFILE" == "" ]]; then
+    error "Puppet CERTFILE or KEYFILE not defined"
+    exit 104
+fi
+
+if [[ ! -e "$CERTFILE" ]]; then
+    error "Puppet CERTFILE '$CERTFILE' does not exist"
+    exit 105
+fi
+
+if [[ ! -e "$KEYFILE" ]]; then
+    error "Puppet KEYFILE '$KEYFILE' does not exist"
+    exit 106
+fi
+
+if [[ $DEBUGLOG ]]; then
+    debug "HOSTMAP is $HOSTMAP"
+    debug "IPMAP is $IPMAP"
+
+    debug "Hammer output will be written to $WORKSPACE/hammer.log"
+fi
+
+trap exit_clock EXIT
+export PIDS
