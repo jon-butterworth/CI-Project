@@ -1,0 +1,74 @@
+## Don't define things here, use environment variables in the build server or your shell
+#
+#
+## This file defines defaults for the jenkins build process. These should not be modified
+## once set, unless more sensible defaults are to be selected. You should use Jenkins environment
+## variables to override these settings in your build plan.
+
+if [[ -z "$DOMAIN" ]]; then
+    DOMAIN="default.domain"
+fi
+
+if [[ -z "$DEFAULT_VMW_NETWORK" ]]; then
+    DEFAULT_VMW_NETWORK="default.vmware.network"
+fi
+
+if [[ -z "$DEFAULT_VMW_COMPUTE" ]]; then
+    DEFAULT_VMW_COMPUTE="default.vmware.compute.profile"
+fi
+
+if [[ -z "$DOMAIN_ID" ]]; then
+     DOMAIN_ID="default.domain.id.from.satellite"
+fi
+
+if [[ -z "$DEFAULT_VMW_IMAGE" ]]; then
+     DEFAULT_VMW_IMAGE="default.vmware.image"
+fi
+
+if [[ -z "$OPERATING_SYSTEM" ]]; then
+    OPERATING_SYSTEM="default.operating.system.from.satellite"
+fi
+
+if [[ -z "$OPERATING_SYSTEM_ID" ]]; then
+    OPERATING_SYSTEM_ID="default.operating.system.id.from.satellit"
+fi
+
+if [[ -z "$WAIT_TIMEOUT" ]]; then
+    WAIT_TIMEOUT="3600"
+fi
+
+if [[ -z "$SPAWN_CIDR" ]]; then
+    SPAWN_CIDR="192.168.1.0/24"
+fi
+
+if [[ -z "$SPAWN_BLACKLIST" ]]; then
+    SPAWN_BLACKLIST="192.168.1.254"
+fi
+
+if [[ -z "$SUBNET" ]]; then
+    SUBNET="default.subnet.from.satellite"
+fi
+
+if [[ -z "$SUBNET_ID" ]]; then
+    SUBNET_ID="default.subnet.id.from.satellite"
+fi
+
+if [[ -z "$LOCATION" ]]; then
+    LOCATION="default.location.from.satellite"
+fi
+
+if [[ -z "$ORGANISATION" ]]; then
+    ORGANISATION="default.organisation.from.satellite"
+fi
+
+if [[ -z "$VM_LIST" ]]; then
+    VM_LIST="test-1 test-2 test-3 test-4"
+fi
+
+if [[ -z "$ASYNC_LIMIT" ]]; then
+    ASYNC_LIMIT=3
+fi
+
+if [[ -z "$TEST_OUTPUT_FORMAT" ]]; then
+    TEST_OUTPUT_FORMAT=junit
+fi
