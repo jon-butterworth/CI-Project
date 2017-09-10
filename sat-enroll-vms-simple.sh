@@ -14,6 +14,7 @@ export SSHPASS='password'
 
 trap killscripts INT
 
+# Investigating issues with Satellite.
 # for role in $VM_LIST; do
 #   info "Enrolling $role into Satellite"
 #
@@ -31,6 +32,8 @@ trap killscripts INT
 #
 #   install_katello_agent $role
 # done;
+
+# Split into separate loops to give Satellite more time between steps.
 
 for role in $VM_LIST; do
   info "Installing Katello CA on $role"
