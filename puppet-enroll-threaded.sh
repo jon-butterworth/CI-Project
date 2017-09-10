@@ -62,3 +62,4 @@ while [[ $failed -eq 1 ]]; do
 done
 
 success "All hosts enrolled"
+ 
