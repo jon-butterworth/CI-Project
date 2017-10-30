@@ -420,6 +420,7 @@ puppet_cert_sign() {
 		return $ecode
 }
 
+
 puppet_cert_revoke() {
 		local role=$1
 		local QUERY_HOST=$(generate_hostname $role)
