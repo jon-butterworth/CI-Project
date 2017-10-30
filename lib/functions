@@ -260,12 +260,10 @@ generate_free_ips() {
 		# fping fetches a list of all unreachable addresses. unfortunately is also includes network and broadcast
 		# it is also somwhat random order and sometimes contains dupes due to how it probes, so we sort and take off the head and tail
 		# then we take the ones we need.
-    #
-    #
 
 		local iplist=$(fping -r1 -u -g $SPAWN_CIDR 2> /dev/null | sort -n -t . -k 1,1 -k 2,2 -k 3,3 -k 4,4 | uniq | tail -n+2 | head -n -1 | grep -v -E "$filter" | head -n$howmany)
 
-		if [[ $(wc -w <<< $iplist) -lt $hownamy ]]; then
+		if [[ $(wc -w <<<$iplist) -lt $hownamy ]]; then
 		    echo "Not enough IP Addresses. We have a problem."
 		fi
 
